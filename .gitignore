@@ -1,0 +1,45 @@
+# Environment and secrets
+.env
+.env.local
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Data and DBs (generated at runtime)
+data/raw/
+data/vectors/
+data/audit/
+*.db
+
+# Logs
+*.log
+logs/
+
+# IDE and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+.docker/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
