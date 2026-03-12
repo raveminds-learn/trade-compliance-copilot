@@ -38,38 +38,57 @@ docker-compose down -v && docker-compose up
 
 First startup: 3–5 min (model download). Subsequent starts: ~20 sec.
 
+### One-click start
+
+**Windows:** Double-click `start.bat` or run in a terminal:
+```bat
+start.bat
+```
+
+**Linux / macOS:** In a terminal:
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+The script checks that Docker is running, creates `.env` from `.env.example` if missing, then runs `docker compose up --build` (or `docker-compose`). Stop with `Ctrl+C` or run `stop.bat` / `./stop.sh` if you use the stop scripts.
+
 ---
 
 ## Project Structure
 
 ```
 trade-compliance-copilot/
-├── app.py                     # entry point — API + scheduler
+├── app.py
 ├── config/
-│   ├── settings.py            # all config via env vars
-│   └── logger.py              # shared logger
+│   ├── settings.py
+│   └── logger.py
 ├── data/
-│   ├── schema.py              # DuckDB schema + init
-│   └── simulator.py           # trade stream generator
+│   ├── schema.py
+│   └── simulator.py
 ├── detection/
-│   ├── engine.py              # detection orchestrator
-│   ├── explainer.py           # Mistral explanation via Ollama
+│   ├── engine.py
+│   ├── explainer.py
 │   ├── rules/
-│   │   ├── wash_trade.py      # buy/sell pair rule
-│   │   └── spoofing.py        # large cancel + execution rule
+│   │   ├── wash_trade.py
+│   │   └── spoofing.py
 │   └── embeddings/
-│       └── store.py           # LanceDB vector operations
-├── queue/
-│   └── manager.py             # alert lifecycle + audit writes
+│       └── store.py
+├── alert_queue/
+│   └── manager.py
 ├── api/
-│   └── main.py                # FastAPI endpoints
+│   └── main.py
 ├── ui/
-│   └── dashboard.py           # Streamlit dashboard
+│   └── dashboard.py
 ├── feedback/
-│   └── processor.py           # weekly calibration job
+│   └── processor.py
 ├── docker-compose.yml
 ├── Dockerfile.app
 ├── Dockerfile.ui
+├── start.bat
+├── start.sh
+├── stop.bat
+├── stop.sh
 ├── requirements.app.txt
 ├── requirements.ui.txt
 └── .env
