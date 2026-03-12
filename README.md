@@ -98,7 +98,7 @@ trade-compliance-copilot/
 
 ## How It Works
 
-1. **Ingest** — trades generated every 8s, stored in DuckDB
+1. **Ingest** — trades generated every 30s, stored in DuckDB
 2. **Detect** — rules + embeddings score each trade cluster (0–100)
 3. **Route** — `< 40` auto-close · `40–75` queue · `> 75` escalate
 4. **Review** — officer sees alert, AI explanation, trader history; submits decision with mandatory reason
@@ -113,13 +113,25 @@ trade-compliance-copilot/
 |----------|---------|-------------|
 | `OLLAMA_MODEL` | `mistral` | LLM model |
 | `OLLAMA_HOST` | `http://ollama:11434` | Ollama URL |
-| `INGEST_INTERVAL_SECS` | `8` | Simulation tick |
+| `INGEST_INTERVAL_SECS` | `30` | Simulation tick |
 | `AUTO_CLOSE_BELOW` | `40` | Auto-close threshold |
 | `ESCALATE_ABOVE` | `75` | Escalation threshold |
 | `WASH_TRADE_WINDOW_SECS` | `30` | Wash trade detection window |
 | `SPOOF_CANCEL_WINDOW_SECS` | `10` | Spoofing detection window |
 | `STANDARD_REVIEW_SLA_MINS` | `240` | Standard review SLA (4h) |
 | `ESCALATED_REVIEW_SLA_MINS` | `60` | Escalated review SLA (1h) |
+
+---
+
+## Admin / Reset
+
+- **Admin tab (dashboard)** exposes a **Reset all data** action.
+- This calls `POST /admin/reset`, which:
+  - Deletes the local DuckDB files for trades and alerts.
+  - Deletes the audit DuckDB file.
+  - Deletes the LanceDB vector store directory.
+  - Re-runs schema init to recreate empty tables.
+- Intended for **local demos and testing only** — it wipes all local history and patterns.
 
 ---
 

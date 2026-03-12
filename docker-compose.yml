@@ -1,0 +1,65 @@
+services:
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: tcc-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    healthcheck:
+      # ollama image has no curl; use CLI to probe the server
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  ollama-init:
+    image: curlimages/curl:latest
+    container_name: tcc-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["sh", "-c", "curl -s -X POST http://ollama:11434/api/pull -d '{\"model\":\"mistral\"}' && echo 'mistral ready'"]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: tcc-api
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - app_data:/app/data
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    restart: unless-stopped
+    healthcheck:
+      # python slim has no curl; use Python to probe /health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: tcc-dashboard
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  app_data:

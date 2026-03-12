@@ -1,0 +1,234 @@
+================================================================================
+TRADE COMPLIANCE COPILOT — TECHNICAL LEARNING GUIDE (REVERSE-ENGINEERING)
+================================================================================
+
+This document describes the step-by-step flows and AI tools used so you can learn
+the concepts by tracing the code. Focus: what each component is and why it is
+used here.
+
+--------------------------------------------------------------------------------
+1. HIGH-LEVEL ARCHITECTURE
+--------------------------------------------------------------------------------
+
+  [Scheduler]  every 8s        every 15m        every 168h (7d)
+       |            |                |                  |
+       v            v                v                  v
+  ingest_batch  run_detection   check_sla_breaches   run_feedback
+       |            |                |                  |
+       v            v                v                  v
+  DuckDB       rules + embeddings  alert_queue      audit_trail
+  (trades)     + LLM explainer    (SLA escalate)  -> LanceDB (confirmed)
+
+  Entry point: app.py
+  - Inits DuckDB + LanceDB dirs (data/schema.py).
+  - Waits for Ollama (LLM server) to be ready.
+  - Starts APScheduler with three jobs; mounts FastAPI from api/main.py and
+    runs uvicorn.
+
+  UI: Streamlit (ui/dashboard.py) talks to the API only (HTTP); no direct
+  DB or AI calls from the UI.
+
+--------------------------------------------------------------------------------
+2. STEP-BY-STEP FLOW
+--------------------------------------------------------------------------------
+
+STEP 1 — BOOTSTRAP (app.py __main__)
+  1. init_db() [data/schema.py]
+     - Creates DuckDB file at data/raw/trades.db with tables: trades, alerts.
+     - Creates separate DuckDB at data/audit/audit.db with table: audit_trail.
+     - Ensures directory for LanceDB at data/vectors/ exists.
+  2. Wait for Ollama (HTTP GET /api/tags) up to 12 attempts, 5s apart.
+  3. Start scheduler; run uvicorn with api.main.app.
+
+STEP 2 — INGEST (every INGEST_INTERVAL_SECS, default 8s)
+  - data/simulator.ingest_batch()
+    1. generate_batch(5): with small probability injects wash_trade or
+       spoofing patterns; rest are normal random trades.
+    2. INSERT trades into DuckDB (trades table).
+    3. Returns list of trade dicts for the same tick’s detection run.
+
+STEP 3 — DETECT (per trade from ingest batch)
+  - detection.engine.run_detection(trader_id, instrument, trade_id)
+    1. Rule layer: wash_trade.detect(...) or spoofing.detect(...).
+       - If neither fires, exit (no alert).
+    2. Get recent trades for (trader_id, instrument) from DuckDB (60s window).
+    3. Embedding layer: embed_sequence(recent) -> vector; search_similar(vector).
+    4. Confidence = rule_score + boost from similar cases (up to 100).
+    5. Route: confidence < 40 -> auto_closed; >= 75 -> escalated; else queued.
+    6. LLM: generate_explanation(...) via Ollama (Mistral).
+    7. INSERT into alerts (DuckDB) with alert_id, explanation, status, sla_deadline.
+
+STEP 4 — ALERT LIFECYCLE (API + dashboard)
+  - Officers use dashboard; API (api/main.py) serves:
+    GET /alerts, GET /alerts/{id}, POST /alerts/{id}/assign,
+    POST /alerts/{id}/decision (decision + reason required).
+  - alert_queue.manager: assign_alert, submit_decision.
+  - submit_decision: UPDATE alerts to closed; INSERT into audit_trail (DuckDB
+    audit DB) with officer_id, decision, reason, confidence_at_decision, etc.
+
+STEP 5 — SLA (every SLA_CHECK_INTERVAL_MINS, default 15m)
+  - alert_queue.manager.check_sla_breaches()
+  - Select alerts where status in (queued, escalated, under_review) and
+    sla_deadline < NOW(); set status = 'escalated'.
+
+STEP 6 — FEEDBACK (every FEEDBACK_INTERVAL_HOURS, default 168 = 7 days)
+  - feedback.processor.run_feedback()
+    1. Read audit_trail for last 7 days.
+    2. For each decision type: confirmed, false_positive, etc.
+    3. For confirmed cases: fetch related trades from DuckDB, then
+       store_confirmed(alert_id, pattern, trades, "confirmed") into LanceDB.
+    4. Log calibration hints (e.g. avg false-positive score) for threshold tuning.
+
+--------------------------------------------------------------------------------
+3. AI AND DATA TOOLS — WHAT THEY ARE AND WHY THEY ARE USED
+--------------------------------------------------------------------------------
+
+3.1 DUCKDB
+  - What: In-process analytical SQL engine (like SQLite for analytics). Data
+    stored in a single file (e.g. trades.db).
+  - Why here: Stores trades and alerts in a simple, portable way. No separate
+    server; the app opens the file and runs SQL. Used for time-window queries
+    (e.g. “trades in last 30s”), aggregations, and alert/audit tables. Fits
+    single-machine, file-based deployment.
+
+  - Where: data/schema.py (DDL), data/simulator.py (writes trades),
+    detection/engine.py and detection/rules/*.py (read/write),
+    alert_queue/manager.py, feedback/processor.py. Second file (audit.db)
+    for immutable audit_trail only.
+
+3.2 SENTENCE-TRANSFORMERS (EMBEDDINGS)
+  - What: Library that turns text into fixed-size vectors (embeddings) using
+    pretrained models (e.g. all-MiniLM-L6-v2). Similar text -> similar
+    vectors; similarity is measured by distance (e.g. L2).
+  - Why here: We need “similar past alerts” for two things: (1) boost
+    confidence when the current cluster looks like known bad behaviour;
+    (2) feed the LLM “similar_count” and later grow a library of confirmed
+    patterns. Raw rules alone don’t capture “looks like that past case”;
+    embeddings provide that semantic similarity.
+
+  - Where: detection/embeddings/store.py
+    - embed_sequence(trades): serializes recent trades to one text string,
+      encodes with SentenceTransformer, returns vector.
+    - Model name from settings: EMBEDDING_MODEL (default all-MiniLM-L6-v2).
+    - Runs in-process; first call loads the model (some memory).
+
+3.3 LANCEDB
+  - What: Vector database that stores embeddings and supports approximate
+    nearest-neighbour search. Data can be on disk (e.g. data/vectors/).
+  - Why here: We have a growing set of “confirmed” trade-pattern vectors from
+    the feedback loop. For each new alert we need “top-k similar past cases.”
+    LanceDB gives fast similarity search without running a heavy external
+    service. Table "trade_patterns" stores vector, alert_id, pattern,
+    outcome, metadata.
+
+  - Where: detection/embeddings/store.py
+    - search_similar(vector, top_k): connects to LanceDB, searches by vector,
+      returns list with similarity (1 - distance); results with distance >= 0.5
+      are filtered out.
+    - store_confirmed(...): called from feedback/processor; adds a new
+      vector + metadata for confirmed cases so future alerts get better
+      “similar historical cases.”
+
+  - Concept: This is “learning from human feedback.” Officers confirm alerts;
+    the system persists those as vectors; later detections use them to
+    increase confidence and to explain (“similar historical cases: N”).
+
+3.4 OLLAMA + MISTRAL (LLM)
+  - What: Ollama is a local server that runs open-weight LLMs (e.g. Mistral).
+    Mistral is a generative language model. The app sends a prompt and
+    receives text (e.g. 2–3 sentences).
+  - Why here: Each alert needs a short, human-readable explanation for
+    compliance officers. Rules produce “evidence” (e.g. “2 buy/sell pairs
+    within 30s”); the LLM turns that plus context (trader, instrument,
+    confidence, similar_count) into a clear, factual summary. If Ollama is
+    down, the engine falls back to the raw rule evidence string.
+
+  - Where: detection/explainer.py
+    - generate_explanation(pattern, trader_id, instrument, evidence,
+      confidence, similar_count).
+    - POST to OLLAMA_HOST/api/generate with model=OLLAMA_MODEL (mistral),
+      prompt=…, stream=False. Response JSON has "response" text.
+
+  - Concept: “AI-assisted” means the LLM augments rule output for readability
+    and context; it does not replace the rule/embedding logic for scoring.
+
+3.5 RULE-BASED DETECTION (WASH TRADE, SPOOFING)
+  - What: Deterministic SQL + logic over DuckDB. No learning; fixed thresholds
+    and window sizes.
+  - Why here: Compliance needs interpretable, auditable signals. Wash trade and
+    spoofing have clear definitions (same trader, opposite sides, narrow
+    price/time; large cancels then execution). Rules give a base score and
+    evidence; embeddings and LLM add similarity and explanation.
+
+  - Where:
+    - detection/rules/wash_trade.py: same trader + instrument, buy and sell
+      executed within WASH_TRADE_WINDOW_SECS, price within
+      WASH_TRADE_PRICE_TOLERANCE -> rule_score 40 + 15*pairs (capped).
+    - detection/rules/spoofing.py: same trader + instrument, large cancelled
+      order(s) (quantity >= SPOOF_MIN_ORDER_QTY) then an execution within
+      SPOOF_CANCEL_WINDOW_SECS -> rule_score 50 + 20*count (capped).
+
+  - Flow: engine calls wash_trade.detect(...) then spoofing.detect(...); uses
+    the first non-None result. That result has pattern, rule_score, evidence.
+
+--------------------------------------------------------------------------------
+4. CONFIDENCE AND ROUTING (AI CONCEPTS)
+--------------------------------------------------------------------------------
+
+  - Base score: Comes from the rule (rule_score in [40..95] or [50..98]).
+  - Boost: Sum of (similarity * 10) for top 3 similar vectors from LanceDB.
+    So “more similar past cases” -> higher confidence (capped at 100).
+  - Routing:
+    - confidence < AUTO_CLOSE_BELOW (40): auto_closed (no human review).
+    - confidence >= ESCALATE_ABOVE (75): escalated (tighter SLA).
+    - Else: queued for standard review.
+  - SLA: Each alert gets sla_deadline from STANDARD_REVIEW_SLA_MINS or
+    ESCALATED_REVIEW_SLA_MINS. check_sla_breaches() upgrades overdue
+    queued/under_review to escalated.
+
+  This is a hybrid system: rules (interpretable) + embeddings (similarity) +
+  LLM (explanation). No model training in the app; “learning” is storing
+  confirmed vectors in LanceDB and using them for similarity and calibration
+  signals.
+
+--------------------------------------------------------------------------------
+5. KEY CONFIG (config/settings.py)
+--------------------------------------------------------------------------------
+
+  Data:
+    DUCKDB_PATH, LANCEDB_PATH, AUDIT_DB_PATH
+
+  Ollama:
+    OLLAMA_HOST, OLLAMA_MODEL (mistral)
+
+  Rules:
+    WASH_TRADE_WINDOW_SECS, WASH_TRADE_PRICE_TOLERANCE
+    SPOOF_CANCEL_WINDOW_SECS, SPOOF_MIN_ORDER_QTY
+
+  Scoring/routing:
+    AUTO_CLOSE_BELOW (40), ESCALATE_ABOVE (75)
+    STANDARD_REVIEW_SLA_MINS, ESCALATED_REVIEW_SLA_MINS
+
+  Scheduler:
+    INGEST_INTERVAL_SECS, SLA_CHECK_INTERVAL_MINS, FEEDBACK_INTERVAL_HOURS
+
+  Embeddings:
+    EMBEDDING_MODEL (all-MiniLM-L6-v2)
+
+--------------------------------------------------------------------------------
+6. FILE-TO-CONCEPT MAP (QUICK REFERENCE)
+--------------------------------------------------------------------------------
+
+  app.py                 — Entry; scheduler; uvicorn
+  data/schema.py         — DuckDB + audit DB + LanceDB dir init
+  data/simulator.py      — Trade generation + DuckDB ingest
+  detection/engine.py    — Orchestrates rules, embeddings, routing, LLM, alert insert
+  detection/rules/      — wash_trade, spoofing (rule_score + evidence)
+  detection/embeddings/store.py — SentenceTransformer + LanceDB (embed, search, store)
+  detection/explainer.py — Ollama/Mistral prompt and response
+  alert_queue/manager.py — Alerts CRUD, assign, decide, audit write, SLA
+  feedback/processor.py  — Audit read; confirmed -> LanceDB; calibration logs
+  api/main.py            — FastAPI routes; health, alerts, assign, decision, audit, stats
+  ui/dashboard.py        — Streamlit UI; calls API only
+
+================================================================================
