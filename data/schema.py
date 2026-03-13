@@ -38,7 +38,6 @@ CREATE TABLE IF NOT EXISTS audit_trail (
     alert_id                VARCHAR NOT NULL,
     trade_id                VARCHAR NOT NULL,
     trader_id               VARCHAR NOT NULL,
-    instrument              VARCHAR NOT NULL,
     officer_id              VARCHAR NOT NULL,
     decision                VARCHAR NOT NULL,
     decision_reason         TEXT NOT NULL,
@@ -59,8 +58,3 @@ def init_db():
 
     with duckdb.connect(str(settings.AUDIT_DB_PATH)) as con:
         con.execute(AUDIT_DDL)
-        cols = [r[0] for r in con.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'audit_trail'"
-        ).fetchall()]
-        if "instrument" not in cols:
-            con.execute("ALTER TABLE audit_trail ADD COLUMN instrument VARCHAR DEFAULT ''")

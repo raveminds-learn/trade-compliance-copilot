@@ -39,9 +39,15 @@ def api_get(path):
 def api_post(path, payload):
     try:
         r = requests.post(f"{API}{path}", json=payload, timeout=10)
-        return r.json() if r.ok else None
-    except Exception:
-        return None
+        if r.ok:
+            return r.json() if r.text else {}
+        try:
+            err = r.json()
+            return {"_error": err.get("detail", r.text or "Request failed")}
+        except Exception:
+            return {"_error": r.text or f"Error {r.status_code}"}
+    except Exception as e:
+        return {"_error": str(e)}
 
 
 def score_color(score):
@@ -210,7 +216,9 @@ elif page == "Review Alert":
         result = api_post(f"/alerts/{alert_id}/decision", {
             "officer_id": officer_id, "decision": decision, "reason": reason
         })
-        if result:
+        if result and result.get("_error"):
+            st.error(result["_error"])
+        elif result and result.get("status") == "recorded":
             st.success("Decision recorded.")
             st.session_state.pop("selected_alert", None)
             st.rerun()

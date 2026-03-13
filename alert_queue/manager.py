@@ -76,12 +76,12 @@ def submit_decision(alert_id: str, officer_id: str, decision: str, reason: str):
     with duckdb.connect(str(settings.AUDIT_DB_PATH)) as con:
         con.execute(
             """INSERT INTO audit_trail
-               (id, alert_id, trade_id, trader_id, instrument, officer_id, decision,
+               (id, alert_id, trade_id, trader_id, officer_id, decision,
                 decision_reason, confidence_at_decision, pattern,
                 time_to_decision_secs, recorded_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             [f"AUD-{uuid.uuid4().hex[:8].upper()}", alert_id, trade_id,
-             trader_id, instrument, officer_id, decision, reason, confidence,
+             trader_id, officer_id, decision, reason, confidence,
              pattern, elapsed, now],
         )
 

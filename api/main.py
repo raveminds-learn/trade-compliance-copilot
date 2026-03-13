@@ -56,8 +56,14 @@ def assign(alert_id: str, payload: AssignPayload):
 def decide(alert_id: str, payload: DecisionPayload):
     if not payload.reason.strip():
         raise HTTPException(status_code=400, detail="reason is required")
-    submit_decision(alert_id, payload.officer_id, payload.decision, payload.reason)
-    return {"status": "recorded"}
+    try:
+        submit_decision(alert_id, payload.officer_id, payload.decision, payload.reason)
+        return {"status": "recorded"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        log.exception("decision submit failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/traders/{trader_id}/history")
