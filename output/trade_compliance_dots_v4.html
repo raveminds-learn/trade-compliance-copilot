@@ -1,0 +1,263 @@
+
+<!DOCTYPE html>
+<head>
+<style>
+  body { margin:0; background:transparent; font-family:system-ui,sans-serif; }
+  canvas { display:block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const W=720, H=1080;
+const dpr=window.devicePixelRatio||1;
+const cv=document.getElementById('c');
+cv.width=W*dpr; cv.height=H*dpr;
+cv.style.width=W+'px'; cv.style.height=H+'px';
+const ctx=cv.getContext('2d');
+ctx.scale(dpr,dpr);
+
+const dark=window.matchMedia('(prefers-color-scheme:dark)').matches;
+const th={
+  text:  dark?'#e8e6de':'#1a1a18',
+  muted: dark?'#888780':'#73726c',
+  arrow: dark?'#9c9a92':'#73726c',
+};
+
+const NODE={
+  f:dark?'#2e2a6e':'#EEEDFE',
+  s:dark?'#AFA9EC':'#534AB7',
+  t:dark?'#CECBF6':'#3C3489',
+};
+const EXIT={
+  f:dark?'#3a3a38':'#f5f5f0',
+  s:dark?'#888780':'#888780',
+  t:dark?'#c2c0b6':'#5f5e5a',
+};
+
+const CX=240, NW=200, NH=52, RX=460, RW=170;
+const MX=CX+NW/2;
+
+const Y={
+  ingestLoop:30, ingest:130, rules:230,
+  semantic:360, exit:340,
+  confScore:480, slaChecker:480,
+  llm:590, slaEsc:590,
+  alert:710, human:820, audit:920,
+  feedJob:920, feedback:1020,
+};
+
+// Store node rects for clipping dots
+const nodeRects=[];
+
+function rr(x,y,w,h,r,fc,sc){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
+  ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r);
+  ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  ctx.lineTo(x+r,y+h);
+  ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r);
+  ctx.quadraticCurveTo(x,y,x+r,y);
+  ctx.closePath();
+  ctx.fillStyle=fc; ctx.fill();
+  ctx.strokeStyle=sc; ctx.lineWidth=1; ctx.stroke();
+}
+
+function box(x,y,w,h,p,label,sub){
+  nodeRects.push({x,y,w,h});
+  rr(x,y,w,h,8,p.f,p.s);
+  ctx.fillStyle=p.t; ctx.textAlign='center'; ctx.textBaseline='middle';
+  if(sub){
+    ctx.font='500 13px system-ui'; ctx.fillText(label,x+w/2,y+h/2-9);
+    ctx.font='400 11px system-ui'; ctx.globalAlpha=0.75;
+    ctx.fillText(sub,x+w/2,y+h/2+9); ctx.globalAlpha=1;
+  } else {
+    ctx.font='500 13px system-ui'; ctx.fillText(label,x+w/2,y+h/2);
+  }
+}
+
+function circ(x,y,r,p,label){
+  nodeRects.push({x:x-r,y:y-r,w:r*2,h:r*2});
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=p.f; ctx.fill();
+  ctx.strokeStyle=p.s; ctx.lineWidth=1; ctx.stroke();
+  ctx.fillStyle=p.t; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.font='400 12px system-ui'; ctx.fillText(label,x,y);
+}
+
+function arrowHead(x,y,ang,color){
+  ctx.save(); ctx.translate(x,y); ctx.rotate(ang);
+  ctx.beginPath(); ctx.moveTo(-7,-4); ctx.lineTo(0,0); ctx.lineTo(-7,4);
+  ctx.strokeStyle=color||th.arrow; ctx.lineWidth=1.5; ctx.lineCap='round'; ctx.stroke();
+  ctx.restore();
+}
+
+function arrow(x1,y1,x2,y2,dash,color,lbl,lblSide){
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
+  ctx.strokeStyle=color||th.arrow; ctx.lineWidth=1;
+  ctx.setLineDash(dash||[]); ctx.stroke(); ctx.setLineDash([]);
+  arrowHead(x2,y2,Math.atan2(y2-y1,x2-x1),color||th.arrow);
+  if(lbl){
+    const mx=(x1+x2)/2, my=(y1+y2)/2;
+    ctx.fillStyle=th.muted; ctx.font='400 11px system-ui';
+    ctx.textAlign=lblSide==='right'?'left':lblSide==='left'?'right':'center';
+    ctx.textBaseline='middle';
+    ctx.fillText(lbl, lblSide==='right'?mx+6:lblSide==='left'?mx-6:mx, my-10);
+  }
+}
+
+function elbow(x1,y1,xm,ym,x2,y2,dash,color,lbl){
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(xm,ym); ctx.lineTo(x2,y2);
+  ctx.strokeStyle=color||th.arrow; ctx.lineWidth=1;
+  ctx.setLineDash(dash||[]); ctx.stroke(); ctx.setLineDash([]);
+  arrowHead(x2,y2,Math.atan2(y2-ym,x2-xm),color||th.arrow);
+  if(lbl){
+    ctx.fillStyle=th.muted; ctx.font='400 11px system-ui';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(lbl,(xm+x2)/2,(ym+y2)/2-10);
+  }
+}
+
+// Dot helpers
+function lerp(a,b,t){return a+(b-a)*t;}
+function posOnPath(path,t){
+  const total=path.length-1;
+  const seg=Math.min(Math.floor(t*total),total-1);
+  const lc=(t*total)-seg;
+  return {x:lerp(path[seg].x,path[seg+1].x,lc),y:lerp(path[seg].y,path[seg+1].y,lc)};
+}
+
+function isInsideAnyNode(x,y,r){
+  for(const n of nodeRects){
+    if(x+r>n.x && x-r<n.x+n.w && y+r>n.y && y-r<n.y+n.h) return true;
+  }
+  return false;
+}
+
+const mainPath=[
+  {x:MX,y:Y.ingestLoop+NH},{x:MX,y:Y.ingest},
+  {x:MX,y:Y.ingest+NH},{x:MX,y:Y.rules},
+  {x:MX,y:Y.rules+NH},{x:MX,y:Y.semantic},
+  {x:MX,y:Y.semantic+NH},{x:MX,y:Y.confScore},
+  {x:MX,y:Y.confScore+NH},{x:MX,y:Y.llm},
+  {x:MX,y:Y.llm+NH},{x:MX,y:Y.alert},
+  {x:MX,y:Y.alert+NH},{x:MX,y:Y.human},
+  {x:MX,y:Y.human+NH},{x:MX,y:Y.audit},
+  {x:MX,y:Y.audit+NH},{x:MX,y:Y.feedback},
+];
+
+const slaPath=[
+  {x:RX+RW/2,y:Y.slaChecker+NH},
+  {x:RX+RW/2,y:Y.slaEsc},
+  {x:RX+RW/2,y:Y.slaEsc+NH},
+  {x:RX+RW/2,y:Y.alert+NH/2},
+  {x:CX+NW,  y:Y.alert+NH/2},
+];
+
+const feedbackPath=[
+  {x:CX+NW,  y:Y.feedback+NH/2},
+  {x:660,    y:Y.feedback+NH/2},
+  {x:660,    y:Y.semantic+NH/2},
+  {x:CX+NW,  y:Y.semantic+NH/2},
+];
+
+const feedJobPath=[
+  {x:85, y:Y.feedJob+NH/2},
+  {x:85, y:Y.feedback+NH/2},
+  {x:CX, y:Y.feedback+NH/2},
+];
+
+const dots=[
+  {path:mainPath,    t:0.0,  speed:0.0022, color:'#534AB7', r:5},
+  {path:mainPath,    t:0.33, speed:0.0022, color:'#534AB7', r:5},
+  {path:mainPath,    t:0.66, speed:0.0022, color:'#534AB7', r:5},
+  {path:slaPath,     t:0.0,  speed:0.004,  color:'#BA7517', r:4},
+  {path:slaPath,     t:0.5,  speed:0.004,  color:'#BA7517', r:4},
+  {path:feedbackPath,t:0.0,  speed:0.0018, color:'#D85A30', r:4},
+  {path:feedJobPath, t:0.0,  speed:0.003,  color:'#D85A30', r:4},
+];
+
+function drawDots(){
+  dots.forEach(d=>{
+    const p=posOnPath(d.path,d.t);
+    if(!isInsideAnyNode(p.x,p.y,d.r)){
+      ctx.beginPath(); ctx.arc(p.x,p.y,d.r,0,Math.PI*2);
+      ctx.fillStyle=d.color; ctx.globalAlpha=0.9; ctx.fill(); ctx.globalAlpha=1;
+    }
+    d.t+=d.speed; if(d.t>1)d.t=0;
+  });
+}
+
+function frame(){
+  ctx.clearRect(0,0,W,H);
+  nodeRects.length=0;
+
+  // ── ARROWS ──
+  arrow(MX,Y.ingestLoop+NH, MX,Y.ingest);
+  arrow(MX,Y.ingest+NH,     MX,Y.rules);
+  arrow(MX,Y.rules+NH,      MX,Y.semantic, [], th.arrow,'match','left');
+  elbow(MX,Y.rules+NH/2+10, 490,Y.rules+NH/2+10, 490,Y.exit);
+  ctx.fillStyle=th.muted; ctx.font='400 11px system-ui';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText('no match', MX+12, Y.rules+NH/2);
+  arrow(MX,Y.semantic+NH,   MX,Y.confScore);
+  arrow(MX,Y.confScore+NH,  MX,Y.llm);
+  arrow(MX,Y.llm+NH,        MX,Y.alert);
+  arrow(MX,Y.alert+NH,      MX,Y.human);
+  arrow(MX,Y.human+NH,      MX,Y.audit);
+  arrow(MX,Y.audit+NH,      MX,Y.feedback, [], th.arrow,'confirmed','left');
+
+  // SLA col
+  arrow(RX+RW/2,Y.slaChecker+NH, RX+RW/2,Y.slaEsc);
+  elbow(RX+RW/2,Y.slaEsc+NH, RX+RW/2,Y.alert+NH/2, CX+NW,Y.alert+NH/2, [], th.arrow,'overdue');
+
+  // FeedJob → feedback
+  elbow(85,Y.feedJob+NH, 85,Y.feedback+NH/2, CX,Y.feedback+NH/2);
+
+  // Feedback loop right rail (dashed)
+  const RR=660;
+  ctx.beginPath();
+  ctx.moveTo(CX+NW, Y.feedback+NH/2);
+  ctx.lineTo(RR, Y.feedback+NH/2);
+  ctx.lineTo(RR, Y.semantic+NH/2);
+  ctx.lineTo(CX+NW, Y.semantic+NH/2);
+  ctx.strokeStyle='#D85A30'; ctx.lineWidth=1; ctx.setLineDash([5,4]); ctx.stroke(); ctx.setLineDash([]);
+  arrowHead(CX+NW, Y.semantic+NH/2, Math.PI, '#D85A30');
+
+  // Feedback loop label — rotated on the right rail
+  ctx.save();
+  ctx.fillStyle='#D85A30'; ctx.globalAlpha=0.7;
+  ctx.font='400 11px system-ui';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.translate(RR+16, (Y.feedback+Y.semantic)/2+NH/2);
+  ctx.rotate(-Math.PI/2);
+  ctx.fillText('boosts future scores', 0, 0);
+  ctx.restore(); ctx.globalAlpha=1;
+
+  // ── DOTS (drawn before nodes so nodes paint over them) ──
+  drawDots();
+
+  // ── NODES (on top of dots) ──
+  box(CX,Y.ingestLoop,NW,NH,NODE,'⏱ Ingest & Detect Loop','every 30s');
+  box(CX,Y.ingest,    NW,NH,NODE,'Ingestion','DuckDB · trades');
+  box(CX,Y.rules,     NW,NH,NODE,'Rule Engine','wash trade · spoofing');
+  box(CX,Y.semantic,  NW,NH,NODE,'Semantic Search','LanceDB ANN · top-3');
+  circ(490,Y.exit+16,22,EXIT,'exit');
+  box(CX,Y.confScore, NW,NH,NODE,'Confidence Scoring','rule score + similarity boost');
+  box(RX,Y.slaChecker,RW,NH,NODE,'⏱ SLA Checker','periodic');
+  box(CX,Y.llm,       NW,NH,NODE,'LLM Explanation','Ollama · Mistral');
+  box(RX,Y.slaEsc,    RW,NH,NODE,'SLA Escalation',null);
+  box(CX,Y.alert,     NW,NH,NODE,'Alert Generation','DuckDB · alerts');
+  box(CX,Y.human,     NW,NH,NODE,'Human-in-the-Loop','Streamlit · FastAPI');
+  box(20,Y.feedJob,   140,NH,NODE,'⏱ Feedback Job','every 7 days');
+  box(CX,Y.audit,     NW,NH,NODE,'Audit Trail','DuckDB · audit_trail');
+  box(CX,Y.feedback,  NW,NH,NODE,'Feedback Storage','LanceDB · trade_patterns');
+
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>

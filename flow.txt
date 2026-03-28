@@ -1,0 +1,219 @@
+================================================================================
+TRADE COMPLIANCE COPILOT — DETAILED DATA & PROCESS FLOW
+================================================================================
+This document describes steps, storage, relationships, alert lifecycle, and how
+feedback is stored for future similarity search. Numbered for learning.
+
+--------------------------------------------------------------------------------
+PART A — STORAGE OVERVIEW (WHAT LIVES WHERE)
+--------------------------------------------------------------------------------
+
+1. DuckDB file: data/raw/trades.db (settings.DUCKDB_PATH)
+   - Table: trades
+   - Columns: trade_id (PK), trader_id, instrument, order_type, quantity, price,
+     order_status, ts
+   - Purpose: append-only stream of simulated trades; rule SQL scans this.
+
+2. DuckDB file: data/raw/trades.db — SAME file, second logical table
+   - Table: alerts
+   - Columns: alert_id (PK), trade_id, trader_id, instrument, pattern, confidence,
+     explanation, status, assigned_to, assigned_at, decided_at, decision,
+     decision_reason, created_at, sla_deadline
+   - Purpose: one row per raised alert; links to the triggering trade via trade_id.
+
+3. DuckDB file: data/audit/audit.db (settings.AUDIT_DB_PATH)
+   - Table: audit_trail
+   - Columns: id (PK), alert_id, trade_id, trader_id, officer_id, decision,
+     decision_reason, confidence_at_decision, pattern, time_to_decision_secs,
+     recorded_at
+   - Purpose: immutable log when an officer submits a decision (separate file so
+     audit is not mixed with operational alert edits in the same way as trades).
+
+4. LanceDB directory: data/vectors/ (settings.LANCEDB_PATH)
+   - Table name in code: trade_patterns
+   - Rows contain: vector (embedding), alert_id, pattern, outcome, metadata (JSON)
+   - Purpose: approximate nearest-neighbour search for “similar past confirmed
+     trade sequences” to boost confidence on new alerts.
+
+5. Ollama (external HTTP service, not a table)
+   - Endpoint used: POST {OLLAMA_HOST}/api/generate
+   - Purpose: generate human-readable explanation text for the alert row.
+
+Relationships (conceptual keys):
+   - trades.trade_id  ←  alerts.trade_id  (which trade triggered the alert row)
+   - alerts.alert_id  ←  audit_trail.alert_id  (which alert was decided)
+   - alerts.trader_id / instrument  tie trades for the same actor and symbol
+   - LanceDB.alert_id  links a stored vector back to a past alert (usually confirmed)
+
+--------------------------------------------------------------------------------
+PART B — SCHEDULED JOBS (WHEN THINGS RUN)
+--------------------------------------------------------------------------------
+
+6. app.py starts BackgroundScheduler with three intervals (see config/settings.py):
+   - INGEST_INTERVAL_SECS: ingest + detection loop (default 30s)
+   - SLA_CHECK_INTERVAL_MINS: SLA breach check (default 15m)
+   - FEEDBACK_INTERVAL_HOURS: feedback job (default 168h = 7 days)
+
+7. FastAPI (api/main.py) serves HTTP; Streamlit dashboard calls the API only.
+
+--------------------------------------------------------------------------------
+PART C — INGEST (STEPS 8–11)
+--------------------------------------------------------------------------------
+
+8. data/simulator.ingest_batch() generates a batch of trades (sometimes injects
+   wash/spoof-like sequences for demo).
+
+9. INSERT into trades (DuckDB) for each generated row. Primary key: trade_id.
+
+10. The ingest function returns the list of trade dicts for this tick.
+
+11. For EACH trade in that list, app.py calls detection.engine.run_detection(
+    trader_id, instrument, trade_id).
+
+--------------------------------------------------------------------------------
+PART D — RULES ONLY USE trades (STEPS 12–18)
+--------------------------------------------------------------------------------
+
+12. run_detection first runs wash_trade.detect(trader_id, instrument).
+
+13. If that returns None, spoofing.detect(trader_id, instrument) runs.
+
+14. Wash trade rule (detection/rules/wash_trade.py):
+    - Reads ONLY table: trades (same DuckDB file as alerts).
+    - Window: last WASH_TRADE_WINDOW_SECS seconds; order_status = 'executed'.
+    - Joins buy prices to sell prices where relative price diff < tolerance.
+    - If pair count = 0 → rule does not fire (returns None).
+    - If pair count > 0 → returns pattern "wash_trade", rule_score, evidence string.
+
+15. Spoofing rule (detection/rules/spoofing.py):
+    - Reads ONLY table: trades.
+    - Finds large cancelled orders (quantity >= SPOOF_MIN_ORDER_QTY) in window.
+    - Counts executed trades after a cancel within SPOOF_CANCEL_WINDOW_SECS.
+    - If count = 0 → None. Else returns pattern "spoofing", rule_score, evidence.
+
+16. If BOTH rules return None → stop; no embedding, no LLM, no alert.
+
+17. If a rule returned a dict → that dict is rule_result for this run.
+
+18. Rules do NOT read LanceDB or call the LLM.
+
+--------------------------------------------------------------------------------
+PART E — RECENT WINDOW FOR EMBEDDING (STEPS 19–21)
+--------------------------------------------------------------------------------
+
+19. _get_recent_trades(trader_id, instrument) SELECTs from trades where the same
+    trader and instrument, ts within last 60 seconds, LIMIT 20.
+
+20. If this list is empty → stop (no alert inserted) even though a rule fired.
+
+21. This window is the input to the embedding model (not the single triggering
+    trade_id alone).
+
+--------------------------------------------------------------------------------
+PART F — EMBEDDING + LANCEDB SIMILARITY (STEPS 22–26)
+--------------------------------------------------------------------------------
+
+22. detection/embeddings/store.embed_sequence(trades):
+    - Concatenates each trade into one text line: order_type, instrument, qty,
+      price, order_status; joins lines with " | ".
+    - SentenceTransformer(settings.EMBEDDING_MODEL) encodes that string → one
+      vector (e.g. 384 dimensions for all-MiniLM-L6-v2).
+
+23. search_similar(vector) opens LanceDB table trade_patterns (if it exists).
+
+24. Nearest-neighbour search returns rows with _distance; results with distance
+    < 0.5 are kept; up to 5 hits; similarity ≈ 1 - distance for scoring.
+
+25. Confidence = rule_result["rule_score"] + sum(similarity * 10) for top 3 hits,
+    capped at 100 (detection/engine._compute_confidence).
+
+26. If trade_patterns is empty, search_similar returns [] → similarity boost is 0.
+
+--------------------------------------------------------------------------------
+PART G — ROUTING + LLM + INSERT ALERT (STEPS 27–33)
+--------------------------------------------------------------------------------
+
+27. _route(confidence): below AUTO_CLOSE_BELOW → status auto_closed; at or above
+    ESCALATE_ABOVE → escalated; else queued.
+
+28. generate_explanation(...) POSTs to Ollama /api/generate with a text prompt built
+    from pattern, trader_id, instrument, evidence, confidence, similar_count.
+
+29. Returned text becomes alerts.explanation (or fallback to evidence if LLM fails).
+
+30. INSERT one row into alerts (DuckDB trades.db) with:
+    - alert_id (new), trade_id (from current detection context), trader_id,
+      instrument, pattern, confidence, explanation, status, sla_deadline, created_at
+    - auto_closed alerts may still be inserted depending on status from routing;
+      SLA may be NULL for auto_closed.
+
+31. At this point an alert is “raised” in the database sense: row exists in alerts.
+
+32. trade_id on the alert ties back to one trade row in trades (the one passed into
+    run_detection for this invocation).
+
+33. No row is written to audit_trail until a human submits a decision.
+
+--------------------------------------------------------------------------------
+PART H — OFFICER REVIEW (STEPS 34–40)
+--------------------------------------------------------------------------------
+
+34. Dashboard calls API GET /alerts → reads alerts WHERE status in open states.
+
+35. GET /alerts/{id} → alert_queue.get_alert_detail → SELECT * FROM alerts.
+
+36. POST /alerts/{id}/assign → updates alerts: status under_review, assigned_to,
+    assigned_at.
+
+37. POST /alerts/{id}/decision with officer_id, decision, reason:
+    - UPDATE alerts SET closed, decision, decision_reason, decided_at
+    - INSERT one row into audit_trail (audit.db) with snapshot fields including
+      confidence_at_decision (from alert at decision time) and pattern.
+
+38. Relationship: audit_trail.alert_id = alerts.alert_id; audit_trail.trade_id and
+    trader_id duplicate key fields for immutable record-keeping.
+
+39. GET /audit lists recent audit_trail rows for the Audit Trail page.
+
+40. Trader history API reads past rows from alerts for the same trader_id.
+
+--------------------------------------------------------------------------------
+PART I — FEEDBACK LOOP (STEPS 41–47)
+--------------------------------------------------------------------------------
+
+41. On FEEDBACK_INTERVAL_HOURS, feedback/processor.run_feedback() runs.
+
+42. Reads audit_trail for the last 7 days (recorded_at window) from audit.db
+    (columns: alert_id, trader_id, pattern, decision, confidence_at_decision).
+
+43. Resolves instrument per alert_id by reading alerts.instrument from the main
+    DuckDB file (audit_trail does not store instrument).
+
+44. Partitions rows by decision: confirmed, false_positive, and derives lists for
+    calibration logging (false positives with high score, “missed” confirmations
+    with low score — definitions in code).
+
+45. For each confirmed decision, the job uses trader_id, instrument (from alerts),
+    and alert_id to reload the trade context: it queries trades around the alert’s
+    created_at (±60 seconds), same trader and instrument, LIMIT 20.
+
+46. embed_sequence(trade_dicts) → vector; store_confirmed(...) appends to LanceDB
+    trade_patterns with pattern label and outcome "confirmed" so future
+    search_similar calls can find neighbours.
+
+47. Thus “feedback for future needs” is: human-confirmed cases become additional
+    vectors in LanceDB, not retrained neural weights in this repo.
+
+48. Calibration hints are only logged (log.warning); thresholds are not auto-updated
+    in code.
+
+--------------------------------------------------------------------------------
+PART J — ADMIN RESET (STEP 49)
+--------------------------------------------------------------------------------
+
+49. POST /admin/reset deletes DuckDB files, LanceDB directory, and re-runs init_db;
+    use only for local demos.
+
+================================================================================
+END
+================================================================================

@@ -9,13 +9,26 @@ log = get_logger("FEEDBACK")
 def run_feedback():
     log.info("feedback run started")
 
-    with duckdb.connect(str(settings.AUDIT_DB_PATH), read_only=True) as con:
-        rows = con.execute("""
-            SELECT alert_id, trader_id, instrument, pattern,
-                   decision, confidence_at_decision
+    with duckdb.connect(str(settings.AUDIT_DB_PATH), read_only=True) as audit_con:
+        audit_rows = audit_con.execute("""
+            SELECT alert_id, trader_id, pattern, decision, confidence_at_decision
             FROM audit_trail
             WHERE recorded_at >= NOW() - INTERVAL '7 days'
         """).fetchall()
+
+    rows = []
+    with duckdb.connect(str(settings.DUCKDB_PATH), read_only=True) as duck_con:
+        for ar in audit_rows:
+            alert_id, trader_id, pattern, decision, confidence_at_decision = ar
+            inst_row = duck_con.execute(
+                "SELECT instrument FROM alerts WHERE alert_id = ?", [alert_id]
+            ).fetchone()
+            if not inst_row:
+                continue
+            instrument = inst_row[0]
+            rows.append(
+                (alert_id, trader_id, instrument, pattern, decision, confidence_at_decision)
+            )
 
     if not rows:
         log.info("feedback run — no records in window")
